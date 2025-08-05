@@ -13,7 +13,6 @@ MarkupSafe==3.0.2
 multidict==6.6.3
 propcache==0.3.2
 # Editable Git install with no remote (python-flask==0.1.0)
--e /home/user/dd
 pytz==2025.2
 txt==2020.11.12
 typing_extensions==4.14.1
