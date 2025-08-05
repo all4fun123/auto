@@ -19,7 +19,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     handlers=[
-        logging.FileHandler('event_log.txt', encoding='utf-8'),
+        #logging.FileHandler('event_log.txt', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
