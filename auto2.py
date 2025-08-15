@@ -19,7 +19,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     handlers=[
-        #logging.FileHandler('event_log.txt', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -32,7 +31,7 @@ class AccountState:
         self.account_nick = None
         self.provinces = []  # Store provinces list
         self.share_count = 0
-        self.max_shares = 40  # Default max shares
+        self.max_shares = 30  # Set max shares to 30
 
 async def run_event_flow(session, username, bearer_token, state):
     try:
@@ -89,8 +88,17 @@ async def run_event_flow(session, username, bearer_token, state):
                     "func": "wish-get-list",
                     "data": ""
                 }
-                async with session.post(login_url, json=list_payload, headers=mission_headers) as response:
-                    list_res = await response.json()
+                for attempt in range(3):  # Retry 3 times
+                    try:
+                        async with session.post(login_url, json=list_payload, headers=mission_headers, ssl=False) as response:
+                            list_res = await response.json()
+                        await asyncio.sleep(0.5)  # Delay 0.5s after API call
+                        break
+                    except Exception as e:
+                        logger.warning(f"Tài khoản {account_nick}: Lỗi lấy danh sách tỉnh (thử {attempt+1}/3): {str(e)}")
+                        if attempt == 2:
+                            return None
+                        await asyncio.sleep(5)
 
                 if list_res.get("code") != 1:
                     logger.warning(f"Tài khoản {account_nick}: Lấy danh sách tỉnh thất bại.")
@@ -122,8 +130,17 @@ async def run_event_flow(session, username, bearer_token, state):
                     "Content": "Chúc sự kiện thành công!"
                 }
             }
-            async with session.post(login_url, json=wish_payload, headers=mission_headers) as response:
-                wish_res = await response.json()
+            for attempt in range(3):  # Retry 3 times
+                try:
+                    async with session.post(login_url, json=wish_payload, headers=mission_headers, ssl=False) as response:
+                        wish_res = await response.json()
+                    await asyncio.sleep(0.5)  # Delay 0.5s after API call
+                    break
+                except Exception as e:
+                    logger.warning(f"Tài khoản {account_nick}: Lỗi gửi lời chúc (thử {attempt+1}/3): {str(e)}")
+                    if attempt == 2:
+                        return None
+                    await asyncio.sleep(5)
 
             if wish_res.get("mess") != "Gửi lời chúc thành công!":
                 logger.warning(f"Tài khoản {account_nick}: Gửi lời chúc thất bại: {wish_res.get('mess')}")
@@ -134,57 +151,91 @@ async def run_event_flow(session, username, bearer_token, state):
             return log_id
 
         async def perform_share(session, log_id, account_nick, username):
-            logger.info(f"Tài khoản {account_nick}: Đang lấy token chia sẻ...")
-            share_time = get_current_timestamp()
-            share_raw = f"{share_time}{maker_code}{au_url}{backend_key_sign}"
-            share_sign = sha256_hex(share_raw)
-            share_url = f"{au_url}/bsau/api/generate-share-token?username={username}&time={share_time}&sign={share_sign}"
-            api_headers = {
-                "User-Agent": browser_headers["User-Agent"],
-                "Accept": "application/json",
-                "Referer": au_url,
-            }
-            async with session.get(share_url, headers=api_headers) as response:
-                content_type = response.headers.get('Content-Type', '')
-                response_text = await response.text()
+            for attempt in range(999):  # Retry 3 times for invalid signature or network errors
+                logger.info(f"Tài khoản {account_nick}: Đang lấy token chia sẻ (thử {attempt+1}/3)...")
+                share_time = get_current_timestamp()
+                share_raw = f"{share_time}{maker_code}{au_url}{backend_key_sign}"
+                share_sign = sha256_hex(share_raw)
+                share_url = f"{au_url}/bsau/api/generate-share-token?username={username}&time={share_time}&sign={share_sign}"
+                api_headers = {
+                    "User-Agent": browser_headers["User-Agent"],
+                    "Accept": "application/json",
+                    "Referer": au_url,
+                }
+                try:
+                    async with session.get(share_url, headers=api_headers, ssl=False) as response:
+                        content_type = response.headers.get('Content-Type', '')
+                        response_text = await response.text()
+                    await asyncio.sleep(0.5)  # Delay 0.5s after API call
+                except Exception as e:
+                    logger.warning(f"Tài khoản {account_nick}: Lỗi lấy token chia sẻ (thử {attempt+1}/3): {str(e)}")
+                    if attempt == 2:
+                        return False
+                    await asyncio.sleep(5)
+                    continue
+
                 if 'application/json' not in content_type:
                     logger.warning(f"Tài khoản {account_nick}: Nhận được phản hồi không phải JSON: Content-Type={content_type}")
-                    return False
+                    if attempt == 2:
+                        return False
+                    await asyncio.sleep(5)
+                    continue
                 try:
                     share_res = json.loads(response_text)
                 except json.JSONDecodeError:
                     logger.warning(f"Tài khoản {account_nick}: Không thể phân tích JSON: {response_text}")
-                    return False
+                    if attempt == 2:
+                        return False
+                    await asyncio.sleep(5)
+                    continue
                 share_token = share_res.get("token")
                 if not share_token:
                     logger.warning(f"Tài khoản {account_nick}: Phản hồi token chia sẻ: {share_res}")
-                    return False
+                    if attempt == 2:
+                        return False
+                    await asyncio.sleep(5)
+                    continue
                 logger.info(f"Tài khoản {account_nick}: Token chia sẻ: {share_token}")
 
-            logger.info(f"Tài khoản {account_nick}: Đang gửi wish-share...")
-            final_time = get_current_timestamp()
-            final_sign = await generate_sign(final_time, "wish-share")
-            share_payload = {
-                "time": final_time,
-                "fromIP": "",
-                "sign": final_sign,
-                "makerCode": maker_code,
-                "func": "wish-share",
-                "data": {
-                    "LogID": log_id,
-                    "key": share_token,
-                    "timestamp": final_time,
-                    "a": "aa"
+                logger.info(f"Tài khoản {account_nick}: Đang gửi wish-share...")
+                final_time = get_current_timestamp()
+                final_sign = await generate_sign(final_time, "wish-share")
+                share_payload = {
+                    "time": final_time,
+                    "fromIP": "",
+                    "sign": final_sign,
+                    "makerCode": maker_code,
+                    "func": "wish-share",
+                    "data": {
+                        "LogID": log_id,
+                        "key": share_token,
+                        "timestamp": final_time,
+                        "a": "aa"
+                    }
                 }
-            }
-            async with session.post(login_url, json=share_payload, headers=mission_headers) as response:
-                share_send_res = await response.json()
-                if share_send_res.get("code") == 1:
-                    logger.info(f"Tài khoản {account_nick}: Gửi wish-share thành công!")
-                    return True
-                else:
-                    logger.warning(f"Tài khoản {account_nick}: Gửi wish-share thất bại: {share_send_res.get('mess')}")
-                    return False
+                try:
+                    async with session.post(login_url, json=share_payload, headers=mission_headers, ssl=False) as response:
+                        share_send_res = await response.json()
+                    await asyncio.sleep(0.5)  # Delay 0.5s after API call
+                    if share_send_res.get("code") == 1:
+                        logger.info(f"Tài khoản {account_nick}: Gửi wish-share thành công!")
+                        return True
+                    elif share_send_res.get("mess") == "Chữ ký không hợp lệ":
+                        logger.warning(f"Tài khoản {account_nick}: Chữ ký không hợp lệ (thử {attempt+1}/3), thử lại toàn bộ bước share...")
+                        if attempt == 2:
+                            logger.warning(f"Tài khoản {account_nick}: Gửi wish-share thất bại sau 3 lần thử: Chữ ký không hợp lệ")
+                            return False
+                        await asyncio.sleep(5)
+                        continue
+                    else:
+                        logger.warning(f"Tài khoản {account_nick}: Gửi wish-share thất bại: {share_send_res.get('mess')}")
+                        return False
+                except Exception as e:
+                    logger.warning(f"Tài khoản {account_nick}: Lỗi gửi wish-share (thử {attempt+1}/3): {str(e)}")
+                    if attempt == 2:
+                        return False
+                    await asyncio.sleep(5)
+                    continue
 
         if state.is_first_run:
             logger.info(f"Tài khoản {username}: Đang đăng nhập (lần đầu)...")
@@ -198,12 +249,22 @@ async def run_event_flow(session, username, bearer_token, state):
                 "func": "account-login",
                 "data": ""
             }
-            async with session.post(login_url, json=login_payload, headers=mission_headers) as response:
-                login_res = await response.json()
-                if login_res.get("code") != 1:
-                    raise Exception(f"Tài khoản {username}: Đăng nhập thất bại: {login_res.get('mess')}")
-                state.account_nick = login_res['data']['AccountNick']
-                logger.info(f"Tài khoản {username}: Đã đăng nhập: {state.account_nick}")
+            for attempt in range(99):  # Retry 3 times
+                try:
+                    async with session.post(login_url, json=login_payload, headers=mission_headers, ssl=False) as response:
+                        login_res = await response.json()
+                    await asyncio.sleep(0.5)  # Delay 0.5s after API call
+                    break
+                except Exception as e:
+                    logger.warning(f"Tài khoản {username}: Lỗi đăng nhập (thử {attempt+1}/3): {str(e)}")
+                    if attempt == 2:
+                        raise Exception(f"Tài khoản {username}: Đăng nhập thất bại sau 3 lần thử: {str(e)}")
+                    await asyncio.sleep(5)
+
+            if login_res.get("code") != 1:
+                raise Exception(f"Tài khoản {username}: Đăng nhập thất bại: {login_res.get('mess')}")
+            state.account_nick = login_res['data']['AccountNick']
+            logger.info(f"Tài khoản {username}: Đã đăng nhập: {state.account_nick}")
             state.is_first_run = False
         else:
             logger.info(f"Tài khoản {username}: Sử dụng thông tin đăng nhập trước đó: {state.account_nick}")
@@ -250,35 +311,41 @@ async def load_accounts():
         logger.error(f"Lỗi khi đọc file accounts.txt: {str(err)}")
         return []
 
+async def process_account(session, username, bearer_token, state, semaphore):
+    async with semaphore:
+        logger.info(f"Bắt đầu xử lý tài khoản {username}...")
+        while state.share_count < state.max_shares:
+            success = await run_event_flow(session, username, bearer_token, state)
+            if success:
+                logger.info(f"Tài khoản {username}: Share thành công, chờ 3 giây...")
+                await asyncio.sleep(10)
+            else:
+                logger.info(f"Tài khoản {username}: Thử lại share sau 5 giây...")
+                await asyncio.sleep(10)
+        logger.info(f"Tài khoản {username}: Đã hoàn thành {state.share_count}/{state.max_shares} shares.")
+
 async def main():
     accounts = await load_accounts()
     if not accounts:
         logger.error("Không có tài khoản nào trong file accounts.txt")
         return
+
     async with aiohttp.ClientSession() as session:
         states = {username: AccountState() for username, _ in accounts}
         semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent accounts
-        async def process_account(username, bearer_token, state):
-            async with semaphore:
-                success = await run_event_flow(session, username, bearer_token, state)
-                if success:
-                    logger.info(f"Tài khoản {username}: Share thành công, chờ 5 giây...")
-                    await asyncio.sleep(5)
-                else:
-                    logger.info(f"Tài khoản {username}: Thử lại share cho tài khoản này sau 5 giây...")
-                    await asyncio.sleep(5)
-                return success
 
-        while True:
-            tasks = [process_account(username, bearer_token, states[username])
-                     for username, bearer_token in accounts]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            logger.info("Hoàn thành một vòng lặp cho tất cả tài khoản, bắt đầu vòng lặp mới...")
-            if all(isinstance(result, Exception) or result is False for result in results):
-                logger.info("Tất cả tài khoản đã đạt giới hạn hoặc gặp lỗi, tạm dừng 60 giây...")
-                await asyncio.sleep(60)
-            else:
-                await asyncio.sleep(1)
+        # Process accounts in groups of 5
+        for i in range(0, len(accounts), 5):
+            batch = accounts[i:i+5]  # Get the next group of up to 5 accounts
+            logger.info(f"Đang xử lý nhóm tài khoản {i+1} đến {i+len(batch)}...")
+            tasks = [
+                process_account(session, username, bearer_token, states[username], semaphore)
+                for username, bearer_token in batch
+            ]
+            await asyncio.gather(*tasks)
+            logger.info(f"Hoàn thành nhóm tài khoản {i+1} đến {i+len(batch)}.")
+
+        logger.info("Đã xử lý xong tất cả các tài khoản.")
 
 if __name__ == "__main__":
     asyncio.run(main())
